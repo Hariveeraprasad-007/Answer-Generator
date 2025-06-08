@@ -1,12 +1,16 @@
-
 import os
-from flask import Flask, request, render_template_string, jsonify
+from flask import Flask, request, render_template_string, jsonify, send_file
 import PyPDF2
 import re
 import requests
 import json
 from io import BytesIO
 from pptx import Presentation # Library for .pptx files
+from docx import Document
+from docx.shared import Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.dml import MSO_THEME_COLOR
+
 
 app = Flask(__name__)
 
@@ -112,12 +116,12 @@ def parse_questions(full_text):
             excluded_patterns = [
                 r'^\s*x\d+\s*$', r'^\s*w\d+\s*$', r'^\s*b\s*$', r'^\s*\+\s*$', r'^\s*y\s*$', r'^\s*1\s*$',
                 r'^\s*Input\s*$', r'^\s*output\s*$', r'^\s*hidden\s+layer\s+\d+\s*$', r'^\s*softmax\s*$',
-                r'^\s*Linear\s*$', r'^\s*CO\d\s*$', r'^\s*K\d\s*$', r'^\s*Knowledge\s+Level\s*$',
+                r'^\s*Linear\s*$', r'^\s*CO\d\s*$', r'^\s*K\d\b\s*', r'^\s*Knowledge\s+Level\s*$',
                 r'^\s*\(Blooms\)\s*$', r'^\s*Difficulty\s+Level\s*$', r'^\s*\(1-5\)\s*$', r'^\s*Reg\. No\s*$',
                 r'^\s*QP\s+Code\s*$', r'^\s*Time:\s*Three\s+hours\s*$', r'^\s*Maximum\s+marks:\s*\d+\s*$',
                 r'^\s*Faculty\s+Name\s*$', r'^\s*Department\s+AIDS\s*$', r'^\s*Answer\s+All\s+Questions\s*$',
                 r'^\s*PART\s+[A-C]\s*$', r'^\s*Q\.\s+No\s*$', r'^\s*\d+\s*$', r'^\s*\)\s*$', r'^\s*\.+$',
-                r'^\s*,+\s*$', r'^\s*\(Or\)\s*$', r'^\s*marks\)\s*$', r'^\s*\(i+\)\s*$', r'^\s*\(a\)\s*',
+                r'^\s*,+\s*$', r'^\s*\(Or\)\s*$', r'^\s*marks\)\s*$', r'^\s*\(i+\)\s*', r'^\s*\(a\)\s*',
                 r'^\s*\(b\)\s*', r'^\s*CO\s*Knowledge\s*$', r'^\s*Level\s*$', r'^\s*\(Blooms\)\s*$',
                 r'^\s*Difficulty\s*$', r'^\s*Level\s*$', r'^\s*\(1-5\)\s*$',
                 r'^\s*Cement BlastFurnaceSlag FlyAsh\s*$', r'^\s*Water Superplasticizer\s*$',
@@ -370,8 +374,7 @@ def upload_slides():
             "uploaded_files": uploaded_slide_filenames
         })
     else:
-        print("Backend: No supported PDF/PPTX lecture slides processed.")
-        return jsonify({"status": "error", "message": "No supported PDF/PPTX lecture slides processed."}), 400
+        print("Backend: No supported PDF/PPTX lecture slides processed." ), 400
 
 
 @app.route('/get_questions', methods=['POST'])
@@ -429,6 +432,93 @@ def generate_single_answer():
     
     print(f"Backend: Successfully generated answer for '{q_id}'.")
     return jsonify({"status": "success", "q_id": q_id, "answer": generated_answer, "slide_sources": slide_sources})
+
+@app.route('/download_docx', methods=['POST'])
+def download_docx():
+    """
+    Converts the provided Markdown text into a .docx file and returns it for download.
+    """
+    data = request.get_json()
+    markdown_text = data.get('markdown_content', '')
+    filename = data.get('filename', 'Generated_Answers.docx')
+
+    document = Document()
+
+    # Add a main title for the document
+    document.add_heading('Generated Answer Document', level=0)
+    document.add_paragraph('This document contains elaborated answers from the AI Answer Generator.', style='Intense Quote') # Using Intense Quote for a slightly different style
+    document.add_paragraph() # Add a blank line
+
+    lines = markdown_text.split('\n')
+    
+    # Simple state for handling bullet points
+    in_bullet_list = False
+
+    for line in lines:
+        line_stripped = line.strip()
+
+        # Handle headings
+        if line_stripped.startswith('## '):
+            document.add_heading(line_stripped[3:], level=2)
+            in_bullet_list = False
+        elif line_stripped.startswith('# '):
+            document.add_heading(line_stripped[2:], level=1)
+            in_bullet_list = False
+        # Handle horizontal rule (---)
+        elif line_stripped == '---':
+            document.add_paragraph().add_run().add_break() # Adds a page break or a line break
+            in_bullet_list = False
+        # Handle bold text within a paragraph (simplified for standalone bold lines)
+        elif line_stripped.startswith('**') and line_stripped.endswith('**'):
+            p = document.add_paragraph()
+            p.add_run(line_stripped.strip('**')).bold = True
+            in_bullet_list = False
+        # Handle bullet points
+        elif line_stripped.startswith('* '):
+            p = document.add_paragraph(style='List Bullet')
+            run = p.add_run(line_stripped[2:])
+            # Check for bold within bullet point
+            bold_matches = re.findall(r'\*\*(.*?)\*\*', line_stripped[2:])
+            if bold_matches:
+                # Add content before first bold
+                if line_stripped[2:].find('**') > 0:
+                    p.add_run(line_stripped[2:line_stripped[2:].find('**')])
+                for match in bold_matches:
+                    p.add_run(match).bold = True
+                    # Add content after bold (if any)
+                    remaining_line = line_stripped[2:].split(f'**{match}**', 1)[1]
+                    p.add_run(remaining_line)
+                    break # Only handle first bold for simplicity
+            else:
+                p.add_run(line_stripped[2:])
+            in_bullet_list = True
+        # Handle regular paragraphs
+        elif line_stripped: # If line is not empty
+            if not in_bullet_list: # Only add new paragraph if not continuing a list
+                p = document.add_paragraph()
+            else: # If still in a list context, add to current paragraph or a new list item
+                p = document.add_paragraph(style='List Bullet') # Assume continued list item
+            
+            # Basic bold detection within paragraphs
+            parts = re.split(r'(\*\*.*?\*\*)', line_stripped)
+            for part in parts:
+                if part.startswith('**') and part.endswith('**'):
+                    p.add_run(part[2:-2]).bold = True
+                else:
+                    p.add_run(part)
+            in_bullet_list = False # Reset for next line
+
+    # Save document to a BytesIO object
+    byte_io = BytesIO()
+    document.save(byte_io)
+    byte_io.seek(0) # Rewind to the beginning of the stream
+
+    return send_file(
+        byte_io,
+        mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        as_attachment=True,
+        download_name=filename
+    )
 
 
 # --- HTML Template ---
@@ -550,11 +640,11 @@ HTML_TEMPLATE = """
             <h2 class="text-2xl font-semibold text-gray-700 mb-4">Generated Answer Document (Markdown)</h2>
             <textarea id="answerOutput" readonly 
                       class="w-full p-4 border border-gray-300 rounded-lg bg-white text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
-            <button id="copyBtn" class="mt-4 bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg shadow-sm transition duration-300 ease-in-out">
-                Copy to Clipboard
+            <button id="downloadDocxBtn" class="mt-4 bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg shadow-sm transition duration-300 ease-in-out">
+                Download as DOCX
             </button>
             <p class="mt-2 text-sm text-gray-600">
-                You can paste the copied Markdown text into any word processor (e.g., Microsoft Word, Google Docs) to convert it to a document format.
+                Click "Download as DOCX" to get a Microsoft Word document (.docx) directly.
             </p>
         </div>
     </div>
@@ -582,7 +672,8 @@ HTML_TEMPLATE = """
             const progressBar = document.getElementById('progressBar');
             const estimatedTime = document.getElementById('estimatedTime');
             const answerOutput = document.getElementById('answerOutput');
-            const copyBtn = document.getElementById('copyBtn');
+            const downloadDocxBtn = document.getElementById('downloadDocxBtn');
+
 
             // --- Upload Question Bank ---
             uploadQbForm.addEventListener('submit', async function(e) {
@@ -751,8 +842,13 @@ HTML_TEMPLATE = """
                 // Step 2: Generate answers for each question sequentially
                 let generatedAnswersCount = 0;
                 // Clear previous output and add main title
-                answerOutput.value = "# Generated Answer Document\\n\\n"; 
-                answerOutput.value += `This document contains answers for questions extracted from **${uploadedQbFilename.textContent.replace('File: ', '')}**, elaborated using information from all uploaded lecture slides and the Gemini API.\\n\\n---\\n\\n`;
+                answerOutput.value = `# Generated Answer Document
+
+This document contains answers for questions extracted from **${uploadedQbFilename.textContent.replace('File: ', '')}**, elaborated using information from all uploaded lecture slides and the Gemini API.
+
+---
+
+`;
 
                 for (let i = 0; i < questions.length; i++) {
                     const q = questions[i];
@@ -777,6 +873,14 @@ HTML_TEMPLATE = """
                             answerOutput.value += `## Question ID: ${q.id}\\n`;
                             answerOutput.value += `**Question:** ${q.text}\\n\\n`;
                             answerOutput.value += `**Answer:**\\n${answerData.answer}\\n\\n`;
+                            
+                            // Add source information to the answer output
+                            if (answerData.slide_sources && answerData.slide_sources.length > 0) {
+                                answerOutput.value += `**(Information primarily sourced from: ${answerData.slide_sources.join(', ')})**\\n\\n`;
+                            } else {
+                                answerOutput.value += `**(No specific slide sources identified for this answer, relying on general knowledge.)**\\n\\n`;
+                            }
+                            
                             answerOutput.value += "---\\n\\n";
                             answerOutput.scrollTop = answerOutput.scrollHeight; // Scroll to bottom
                             generatedAnswersCount++;
@@ -811,15 +915,86 @@ HTML_TEMPLATE = """
                 console.log('All answers generation process completed.');
             });
 
-            // --- Copy to Clipboard ---
-            copyBtn.addEventListener('click', function() {
-                answerOutput.select();
+            // --- Download as DOCX ---
+            downloadDocxBtn.addEventListener('click', async function() {
+                const markdownContent = answerOutput.value;
+                if (!markdownContent.trim()) {
+                    // Using a custom message box instead of alert()
+                    const messageBox = document.createElement('div');
+                    messageBox.className = 'fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center';
+                    messageBox.innerHTML = `
+                        <div class="bg-white p-6 rounded-lg shadow-xl text-center">
+                            <p class="text-lg font-semibold text-gray-800 mb-4">Please generate answers first before downloading.</p>
+                            <button id="messageBoxClose" class="mt-4 bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg">OK</button>
+                        </div>
+                    `;
+                    document.body.appendChild(messageBox);
+                    document.getElementById('messageBoxClose').addEventListener('click', () => messageBox.remove());
+                    return;
+                }
+
                 try {
-                    document.execCommand('copy');
-                    alert('Answer document copied to clipboard!'); 
-                } catch (err) {
-                    console.error('Failed to copy text: ', err);
-                    alert('Failed to copy text. Please manually copy from the textbox.');
+                    const response = await fetch('/download_docx', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ markdown_content: markdownContent, filename: 'Generated_Deep_Learning_Answers.docx' }),
+                    });
+
+                    if (response.ok) {
+                        const blob = await response.blob();
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.style.display = 'none';
+                        a.href = url;
+                        a.download = 'Generated_Deep_Learning_Answers.docx'; 
+                        document.body.appendChild(a);
+                        a.click();
+                        window.URL.revokeObjectURL(url);
+                        
+                        // Custom success message box
+                        const messageBox = document.createElement('div');
+                        messageBox.className = 'fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center';
+                        messageBox.innerHTML = `
+                            <div class="bg-white p-6 rounded-lg shadow-xl text-center">
+                                <p class="text-lg font-semibold text-green-700 mb-4">DOCX document downloaded successfully!</p>
+                                <button id="messageBoxClose" class="mt-4 bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg">OK</button>
+                            </div>
+                        `;
+                        document.body.appendChild(messageBox);
+                        document.getElementById('messageBoxClose').addEventListener('click', () => messageBox.remove());
+
+                    } else {
+                        const errorText = await response.text();
+                        console.error('Error downloading DOCX:', response.status, errorText);
+                        
+                        // Custom error message box
+                        const messageBox = document.createElement('div');
+                        messageBox.className = 'fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center';
+                        messageBox.innerHTML = `
+                            <div class="bg-white p-6 rounded-lg shadow-xl text-center">
+                                <p class="text-lg font-semibold text-red-600 mb-4">Failed to download DOCX document. Please check console for details.</p>
+                                <button id="messageBoxClose" class="mt-4 bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg">OK</button>
+                            </div>
+                        `;
+                        document.body.appendChild(messageBox);
+                        document.getElementById('messageBoxClose').addEventListener('click', () => messageBox.remove());
+                    }
+                } catch (error) {
+                    console.error('Network error during DOCX download:', error);
+                    
+                    // Custom network error message box
+                    const messageBox = document.createElement('div');
+                    messageBox.className = 'fixed inset-0 bg-gray-600 bg-opacity-50 flex items-center justify-center';
+                    messageBox.innerHTML = `
+                        <div class="bg-white p-6 rounded-lg shadow-xl text-center">
+                            <p class="text-lg font-semibold text-red-600 mb-4">Network error during DOCX download. Please ensure the server is running.</p>
+                            <button id="messageBoxClose" class="mt-4 bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg">OK</button>
+                            </div>
+                        `;
+                    document.body.appendChild(messageBox);
+                    document.getElementById('messageBoxClose').addEventListener('click', () => messageBox.remove());
                 }
             });
         });

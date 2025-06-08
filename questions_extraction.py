@@ -43,26 +43,29 @@ def parse_questions(full_text):
     questions = {}
     
     # This regex is designed to capture:
-    # 1. The Question ID (e.g., QA101, QB201, QC301)
-    # 2. Non-greedily match any characters that could be part of the header/metadata
+    # 1. The Question ID, potentially including (a) or (b) like QB101 (b)
+    # 2. Non-greedily consume any characters that could be part of the header/metadata
     #    between the Q ID and the actual question content.
     # 3. Non-greedily capture the question text itself.
     # 4. Stop when it encounters a pattern indicating the end of a question.
     
+    # Updated regex to directly capture 'QB101 (b)' or 'QC101 (a)' as part of the ID,
+    # if it appears in that format in the raw text.
+    # It also accounts for the `,"(a)` and `,"(b)` structures that might follow the base ID
+    # but lead the question content.
     question_block_pattern = re.compile(
-        r'(Q[ABC]\d{3})'                     # Group 1: Captures the Q ID (e.g., QA101)
-        r'(?:[^Q]*?)'                        # Non-greedily consume any characters until either 'Questions' or the question text starts,
-                                             # but stopping before the next 'Q' for efficiency if 'Questions' isn't found.
-        r'(?:Questions\s*|)'                 # Optional 'Questions' literal, followed by whitespace
+        r'(Q[ABC]\d{3}(?:\s*\([ab]\))?)'     # Group 1: Captures Q ID (e.g., QA101, QB101 (b))
+        r'(?:[^Q]*?)'                        # Non-greedily consume any characters until 'Questions', '(' or question text starts
+        r'(?:Questions\s*|"\s*\([ab]\)\s*|)' # Optional 'Questions', OR '", (a)'/'", (b)' literal, followed by whitespace
         r'\s*(.*?)'                          # Group 2: Non-greedily captures the main question text content
-        r'(?=\s*"\s*CO\s*|\s*Q[ABC]\d{3}|$)' # Positive Lookahead: asserts the end of the current question block
+        r'(?=\s*"\s*CO\s*|\s*Q[ABC]\d{3}(?:\s*\([ab]\))?|$)' # Positive Lookahead: asserts the end of the current question block
         ,re.DOTALL
     )
 
     matches = question_block_pattern.finditer(full_text)
 
     for match in matches:
-        q_id = match.group(1).strip()
+        q_id = match.group(1).strip() # This will now capture QB101, QB101 (b), etc.
         raw_q_text = match.group(2).strip()
 
         # Further cleaning steps for the extracted question text:
@@ -109,7 +112,7 @@ def parse_questions(full_text):
                 r'^\s*\(Or\)\s*$',      # Lines with just "(Or)"
                 r'^\s*marks\)\s*$',     # isolated "marks)" from (X marks)
                 r'^\s*\(i+\)\s*$',       # (i), (ii), (iii) markers
-                r'^\s*\(a\)\s*$',       # (a), (b) markers for sub-questions
+                r'^\s*\(a\)\s*$',       # (a), (b) markers for sub-questions when they are standalone on a line
                 r'^\s*\(b\)\s*$',
                 r'^\s*CO\s*Knowledge\s*$',
                 r'^\s*Level\s*$',
@@ -149,8 +152,13 @@ def parse_questions(full_text):
                 line = re.sub(r'\s*\bCO\d\b\s*|\s*\bK\d\b\s*', '', line)
                 # Remove (X Marks) directly from the text if they are not the only thing on a line
                 line = re.sub(r'\s*\(\d+\s*Marks?\)\s*', '', line)
-                line = re.sub(r'^\s*\(i+\)\s*', '', line) # Remove (i), (ii), (iii) if they start a line
-                line = re.sub(r'^\s*\(a\)\s*', '', line) # Remove (a), (b) if they start a line
+                # Remove (i), (ii), (iii), (a), (b) if they start a line, but only if they are not meant to be part of the ID
+                # The primary capture of (a)/(b) for the ID should happen in the regex
+                # This ensures we don't accidentally remove them if they're *part* of the question text.
+                line = re.sub(r'^\s*\(i+\)\s*', '', line)
+                # For (a) and (b), only remove if they are standalone markers, as they are now captured in the ID.
+                # If they appear mid-sentence, they should generally stay unless explicitly filtered by context.
+                line = re.sub(r'^\s*\(a\)\s*', '', line)
                 line = re.sub(r'^\s*\(b\)\s*', '', line)
                 line = re.sub(r'^\s*\d+\s*$', '', line).strip() # Remove isolated numbers
                 
